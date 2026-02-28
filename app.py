@@ -37,17 +37,22 @@ def setup_logger():
     logger.addHandler(console_handler)
     logger.addHandler(stream_handler)
 
+SUPPORTED_AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "ogg"]
+
+MIME_TYPE_MAP = {
+    'mp3': 'audio/mpeg',
+    'wav': 'audio/wav',
+    'm4a': 'audio/mp4',
+    'flac': 'audio/flac',
+    'ogg': 'audio/ogg',
+}
+
+UPLOAD_MAX_SIZE_MB = 500
+
 def get_mime_type(filename):
     """根據檔案副檔名取得對應的 MIME type"""
     ext = filename.lower().split('.')[-1] if '.' in filename else ''
-    mime_map = {
-        'mp3': 'audio/mpeg',
-        'wav': 'audio/wav',
-        'm4a': 'audio/mp4',
-        'flac': 'audio/flac',
-        'ogg': 'audio/ogg',
-    }
-    return mime_map.get(ext, 'audio/mpeg')
+    return MIME_TYPE_MAP.get(ext, 'audio/mpeg')
 
 # --- API 驗證與額度檢查 ---
 
@@ -295,6 +300,7 @@ SEGMENTATION_SCHEMA = {
 # 分批處理設定
 SEGMENTATION_BATCH_MAX_CHARS = 600
 SEGMENTATION_BATCH_DELIMITERS = set("。！？!?.；;")
+SEGMENTATION_BATCH_SOFT_DELIMITERS = set("，,、 \t")
 
 # Few-shot 範例
 FEW_SHOT_EXAMPLES = {
@@ -364,7 +370,7 @@ def split_text_into_batches(text, max_chars=SEGMENTATION_BATCH_MAX_CHARS):
 
         if split_pos == -1:
             for i in range(min(max_chars, len(remaining)) - 1, max_chars // 2, -1):
-                if remaining[i] in set("，,、 \t"):
+                if remaining[i] in SEGMENTATION_BATCH_SOFT_DELIMITERS:
                     split_pos = i + 1
                     break
 
@@ -376,7 +382,11 @@ def split_text_into_batches(text, max_chars=SEGMENTATION_BATCH_MAX_CHARS):
 
     return batches
 
+# 對齊演算法設定
 NORMALIZE_IGNORE_CHARS = set(" \t\n\r，。？！：；、,.?!:;\"'()（）[]{}-—－~～《》")
+ALIGNMENT_SEARCH_WINDOW = 50
+ALIGNMENT_FALLBACK_CHAR_DURATION = 0.25
+ALIGNMENT_FALLBACK_CHARS_PER_SEC = 4.0
 
 def _content_length(text):
     """計算忽略標點後的實際內容字數"""
@@ -584,29 +594,6 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
 
     return "\n".join(all_lines), total_usage
 
-# --- 3.5 繁簡轉換 (OpenCC) ---
-
-def convert_srt_to_traditional(srt_data):
-    """
-    使用 OpenCC 將字幕轉換為台灣繁體中文
-    s2twp = Simplified to Traditional (Taiwan) with Phrase conversion
-    """
-    logger.info("Starting Traditional Chinese conversion with OpenCC...")
-
-    try:
-        # s2twp: 簡體到繁體（台灣）並轉換詞彙（如：視頻→影片）
-        converter = opencc.OpenCC('s2twp')
-
-        for item in srt_data:
-            item['text'] = converter.convert(item['text'])
-
-        logger.info("Traditional Chinese conversion successful (OpenCC).")
-        return srt_data
-
-    except Exception as e:
-        logger.error(f"OpenCC conversion error: {e}")
-        return srt_data
-
 # --- 4. 核心邏輯：Alignment (對齊) ---
 def align_transcript(raw_api_data, llm_segmented_text):
     """
@@ -670,10 +657,10 @@ def align_transcript(raw_api_data, llm_segmented_text):
         audio_duration = raw_api_data.get('audio_duration', None)
         if audio_duration is None:
             total_text_len = sum(len(line.strip()) for line in lines if line.strip())
-            audio_duration = total_text_len / 4.0 if total_text_len > 0 else 60.0
+            audio_duration = total_text_len / ALIGNMENT_FALLBACK_CHARS_PER_SEC if total_text_len > 0 else 60.0
         
         total_chars_count = sum(len(line.strip()) for line in lines if line.strip())
-        char_duration = audio_duration / total_chars_count if total_chars_count > 0 else 0.25
+        char_duration = audio_duration / total_chars_count if total_chars_count > 0 else ALIGNMENT_FALLBACK_CHAR_DURATION
 
         current_time = 0.0
         line_index = 0
@@ -696,12 +683,10 @@ def align_transcript(raw_api_data, llm_segmented_text):
 
     # --- 2. 預處理：正規化原始序列 ---
     searchable_raw = []
-    # 定義要忽略的標點符號 (包含半形與全形)
-    ignore_chars = set(" \t\n\r，。？！：；、,.?!:;\"'()（）[]{}-—－~～《》")
     
     for rc in raw_chars:
         c = rc['text']
-        if c not in ignore_chars:
+        if c not in NORMALIZE_IGNORE_CHARS:
             searchable_raw.append({
                 'char': c.lower(),
                 'start': rc['start'],
@@ -723,7 +708,7 @@ def align_transcript(raw_api_data, llm_segmented_text):
         if not clean_line:
             continue
             
-        line_chars = [c.lower() for c in clean_line if c not in ignore_chars]
+        line_chars = [c.lower() for c in clean_line if c not in NORMALIZE_IGNORE_CHARS]
         total_llm_chars += len(line_chars)
         
         if not line_chars:
@@ -740,7 +725,7 @@ def align_transcript(raw_api_data, llm_segmented_text):
 
         for lc in line_chars:
             # 視窗搜尋 (Window Search)
-            search_window = 50 # 擴大搜尋範圍以容錯
+            search_window = ALIGNMENT_SEARCH_WINDOW
             found_at = -1
             
             for offset in range(search_window):
@@ -769,7 +754,7 @@ def align_transcript(raw_api_data, llm_segmented_text):
             last_valid_end = line_end_time
         else:
             # 該行完全未匹配 (Fallback)
-            est_duration = len(line_chars) * 0.25
+            est_duration = len(line_chars) * ALIGNMENT_FALLBACK_CHAR_DURATION
             line_start_time = last_valid_end
             line_end_time = last_valid_end + est_duration
             last_valid_end = line_end_time
@@ -831,8 +816,8 @@ def apply_replacements_to_lines(lines, replacements):
 
 def set_srt_texts(srt_data, lines):
     if len(srt_data) != len(lines):
-        logger.warning("SRT update skipped due to length mismatch.")
-        return srt_data
+        logger.warning(f"SRT line count mismatch: srt={len(srt_data)}, lines={len(lines)}. Updating available lines only.")
+        st.warning(f"⚠️ 校正/翻譯後行數不一致 (原 {len(srt_data)} 行 → {len(lines)} 行)，部分字幕可能未更新。")
 
     for item, line in zip(srt_data, lines):
         item["text"] = line
@@ -991,14 +976,11 @@ def clean_subtitle_text(text):
     return text
 
 def generate_srt_string(srt_data, clean_text=True):
-    output = ""
+    parts = []
     for item in srt_data:
-        # 清理每行字幕文字
         cleaned_text = clean_subtitle_text(item['text']) if clean_text else item['text']
-        output += f"{item['index']}\n"
-        output += f"{item['start']} --> {item['end']}\n"
-        output += f"{cleaned_text}\n\n"
-    return output
+        parts.append(f"{item['index']}\n{item['start']} --> {item['end']}\n{cleaned_text}\n")
+    return "\n".join(parts) + "\n" if parts else ""
 
 # --- 5. Streamlit UI ---
 st.set_page_config(page_title="AI 字幕生成器 (ElevenLabs + OpenAI)", layout="wide")
@@ -1157,14 +1139,17 @@ with st.sidebar:
             st.caption("目前模型不支援 reasoning 設定。")
 
 # Main Area
-uploaded_file = st.file_uploader("上傳音訊檔案 (mp3, wav, m4a)", type=["mp3", "wav", "m4a"])
+uploaded_file = st.file_uploader("上傳音訊檔案 (mp3, wav, m4a, flac, ogg)", type=SUPPORTED_AUDIO_TYPES)
 
 # 初始化 session state 來儲存結果
 if 'result' not in st.session_state:
     st.session_state.result = None
 
 if uploaded_file and el_key and oa_key:
-    if st.button("開始生成字幕"):
+    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+    if file_size_mb > UPLOAD_MAX_SIZE_MB:
+        st.error(f"❌ 檔案過大 ({file_size_mb:.1f} MB)，上限為 {UPLOAD_MAX_SIZE_MB} MB。")
+    elif st.button("開始生成字幕"):
         # 設定 logger
         setup_logger()
         log_stream = get_log_stream()
