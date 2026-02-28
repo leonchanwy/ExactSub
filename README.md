@@ -20,13 +20,16 @@ The result: subtitles that are both **accurately timed** and **naturally segment
 - **Semantic segmentation** — LLM-powered line breaking that respects meaning and reading flow
 - **Multiple subtitle styles** — YouTube (full sentences, 10–30 chars/line) or TikTok (short bursts, 3–8 chars/line)
 - **Multi-language support** — Chinese, English, Japanese, Korean, Cantonese, or auto-detect
+- **Speaker diarization** — Identify and annotate different speakers in the audio
+- **Keyterms** — Bias transcription towards specific terms for better recognition accuracy
 - **Text correction** — Optional LLM pass to fix transcription errors
 - **Translation** — Translate subtitles into Traditional Chinese, English, Japanese, or Malay
 - **Simplified → Traditional Chinese** — Lightweight OpenCC conversion (no LLM needed)
 - **Keyword rules** — Define glossary replacements (e.g., `OpenAI=>OpenAI`) or terms to preserve
 - **Punctuation cleaning** — Remove leading dashes, trailing commas/periods from subtitle lines
 - **Cost tracking** — Real-time cost estimation for both ElevenLabs and OpenAI API usage
-- **Multiple models** — GPT-4.1, GPT-4.1 mini, GPT-5.2, GPT-5-mini with configurable reasoning effort
+- **Transcription model selection** — Choose between Scribe v2 (recommended) and Scribe v1
+- **Multiple LLM models** — GPT-4.1, GPT-4.1 mini, GPT-5.2, GPT-5-mini with configurable reasoning effort
 
 ## How It Works
 
@@ -95,12 +98,14 @@ Then open the URL shown in the terminal (default: `http://localhost:8501`).
 
 | Option | Description |
 |--------|-------------|
+| Transcription model | Choose Scribe v2 (recommended) or Scribe v1 |
+| Speaker diarization | Annotate different speakers in multi-person audio |
 | Custom segmentation prompt | Additional instructions for the LLM segmenter |
 | Punctuation cleaning | Strip leading dashes and trailing punctuation |
 | Text correction | LLM pass to fix transcription typos |
 | Translation | Translate to another language via LLM |
 | OpenCC conversion | Lightweight Simplified → Traditional Chinese (no LLM) |
-| Keyword rules | `source=>target` replacements or terms to preserve |
+| Keyword rules | `source=>target` replacements or keyterms to preserve (also sent to ElevenLabs for better recognition) |
 | Reasoning effort (GPT-5) | Control thinking depth: none → xhigh |
 | Retry settings | Configure upload timeout and retry behavior |
 
@@ -152,13 +157,16 @@ MIT
 - **語意斷句** — LLM 驅動的智慧換行，尊重語意和閱讀節奏
 - **多種字幕風格** — YouTube（完整語句，每行 10–30 字）或 TikTok（短句快節奏，每行 3–8 字）
 - **多語言支援** — 中文、英文、日文、韓文、粵語，或自動偵測
+- **說話者辨識** — 標註音訊中不同說話者，適合多人對話場景
+- **Keyterms** — 將關鍵詞傳給轉錄 API，提高特定詞彙的辨識準確度
 - **文字校正** — 可選的 LLM 校正，修正轉錄錯字
 - **翻譯** — 可翻譯為繁體中文、英文、日文或馬來文
 - **繁簡轉換** — 使用 OpenCC 輕量轉換，無需呼叫 LLM
 - **詞彙表規則** — 定義替換規則（如 `OpenAI=>OpenAI`）或強制保留詞
 - **標點清理** — 移除行首破折號、行尾逗號/句號
 - **費用追蹤** — 即時顯示 ElevenLabs 和 OpenAI 的 API 使用成本
-- **多模型支援** — GPT-4.1、GPT-4.1 mini、GPT-5.2、GPT-5-mini，可調整推理強度
+- **轉錄模型選擇** — 可選 Scribe v2（推薦）或 Scribe v1
+- **多 LLM 模型支援** — GPT-4.1、GPT-4.1 mini、GPT-5.2、GPT-5-mini，可調整推理強度
 
 ## 運作原理
 
@@ -227,12 +235,14 @@ streamlit run app.py
 
 | 選項 | 說明 |
 |------|------|
+| 轉錄模型 | 選擇 Scribe v2（推薦）或 Scribe v1 |
+| 說話者辨識 | 標註多人對話中的不同說話者 |
 | 自訂斷句指令 | 給 LLM 斷句的額外提示詞 |
 | 標點清理 | 移除行首破折號與行尾標點 |
 | 字幕校正 | LLM 修正轉錄錯字與聽錯詞 |
 | 翻譯 | 透過 LLM 翻譯為其他語言 |
 | OpenCC 繁簡轉換 | 輕量簡體→繁體轉換（不需 LLM） |
-| 詞彙表規則 | `原詞=>目標詞` 替換或保留詞 |
+| 詞彙表規則 | `原詞=>目標詞` 替換或保留詞（保留詞同時作為 keyterms 傳給轉錄 API 提高辨識率） |
 | 推理強度（GPT-5） | 控制思考深度：none → xhigh |
 | 重試設定 | 設定上傳逾時與重試行為 |
 
