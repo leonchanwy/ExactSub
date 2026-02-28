@@ -1146,7 +1146,7 @@ if 'result' not in st.session_state:
     st.session_state.result = None
 
 if uploaded_file and el_key and oa_key:
-    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+    file_size_mb = uploaded_file.size / (1024 * 1024)
     if file_size_mb > UPLOAD_MAX_SIZE_MB:
         st.error(f"❌ 檔案過大 ({file_size_mb:.1f} MB)，上限為 {UPLOAD_MAX_SIZE_MB} MB。")
     elif st.button("開始生成字幕"):
