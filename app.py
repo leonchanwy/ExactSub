@@ -216,27 +216,34 @@ def transcribe_audio(
     file_obj,
     api_key,
     language_code=None,
+    model_id="scribe_v2",
+    diarize=False,
+    keyterms=None,
     timeout=(30, 1800),
     max_retries=2,
     retry_backoff=5
 ):
     """
     使用 ElevenLabs Scribe 模型進行轉錄。
+    支援 scribe_v1 / scribe_v2，以及 keyterms 和 diarize。
     """
-    logger.info("Starting transcription with ElevenLabs Scribe v2...")
+    logger.info(f"Starting transcription with ElevenLabs {model_id}...")
     url = "https://api.elevenlabs.io/v1/speech-to-text"
     headers = {
         "xi-api-key": api_key
     }
-    # 使用 Scribe v2 進行語音轉文字
-    data = {
-        "model_id": "scribe_v2",
-        "tag_audio_events": "false",
-        "timestamps_granularity": "character",  # 重要！取得字元級時間戳記
-    }
-    # 只有在指定語言時才加入 language_code
+    data = [
+        ("model_id", model_id),
+        ("tag_audio_events", "false"),
+        ("timestamps_granularity", "character"),
+    ]
     if language_code and language_code != "auto":
-        data["language_code"] = language_code
+        data.append(("language_code", language_code))
+    if diarize:
+        data.append(("diarize", "true"))
+    if keyterms:
+        for term in keyterms[:100]:
+            data.append(("keyterms", term[:50]))
 
     try:
         file_obj.seek(0)
@@ -1059,6 +1066,16 @@ with st.sidebar:
     selected_lang = st.selectbox("音訊語言", list(language_options.keys()))
     language_code = language_options[selected_lang]
 
+    # ElevenLabs 模型選擇
+    scribe_options = {
+        "Scribe v2 (推薦)": "scribe_v2",
+        "Scribe v1": "scribe_v1",
+    }
+    selected_scribe = st.selectbox("轉錄模型", list(scribe_options.keys()), index=0)
+    scribe_model = scribe_options[selected_scribe]
+
+    enable_diarize = st.checkbox("說話者辨識 (Diarize)", value=False, help="標註音訊中不同說話者，適合多人對話場景。")
+
     reasoning_effort = None
     with st.expander("進階設定"):
         custom_prompt = st.text_area("給斷句 LLM 的額外指令", value="保留語氣詞。")
@@ -1291,10 +1308,15 @@ if uploaded_file and el_key and oa_key:
 
         if btn_full:
             uploaded_file.seek(0)
+            _, api_keep_terms = parse_keyword_rules(keyword_rules)
             est_minutes = max(1, file_size_mb * 0.5)
-            with st.spinner(f"🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v2)... 預估需要 {est_minutes:.0f}-{est_minutes * 2:.0f} 分鐘"):
+            scribe_label = scribe_model.replace("_", " ").title()
+            with st.spinner(f"🎧 正在上傳至 ElevenLabs 進行轉錄 ({scribe_label})... 預估需要 {est_minutes:.0f}-{est_minutes * 2:.0f} 分鐘"):
                 raw_transcript = transcribe_audio(
                     uploaded_file, el_key, language_code,
+                    model_id=scribe_model,
+                    diarize=enable_diarize,
+                    keyterms=api_keep_terms if api_keep_terms else None,
                     timeout=(connect_timeout, read_timeout),
                     max_retries=int(retry_count),
                     retry_backoff=int(retry_backoff)
