@@ -292,6 +292,41 @@ SEGMENTATION_SCHEMA = {
     "additionalProperties": False
 }
 
+# 分批處理設定
+SEGMENTATION_BATCH_MAX_CHARS = 600
+SEGMENTATION_BATCH_DELIMITERS = set("。！？!?.；;")
+
+# Few-shot 範例
+FEW_SHOT_EXAMPLES = {
+    "youtube": {
+        "input": "今天我想跟大家聊一下關於人工智慧的發展其實最近這幾年AI的進步真的非常快從語音辨識到圖像生成每一個領域都有突破性的變化",
+        "output": [
+            "今天我想跟大家聊一下",
+            "關於人工智慧的發展",
+            "其實最近這幾年",
+            "AI的進步真的非常快",
+            "從語音辨識到圖像生成",
+            "每一個領域都有突破性的變化"
+        ]
+    },
+    "tiktok": {
+        "input": "今天我想跟大家聊一下關於人工智慧的發展其實最近這幾年AI的進步真的非常快從語音辨識到圖像生成每一個領域都有突破性的變化",
+        "output": [
+            "今天我想跟大家",
+            "聊一下",
+            "關於人工智慧",
+            "的發展",
+            "其實最近這幾年",
+            "AI的進步",
+            "真的非常快",
+            "從語音辨識",
+            "到圖像生成",
+            "每一個領域都有",
+            "突破性的變化"
+        ]
+    }
+}
+
 def parse_lines_from_json(raw_text):
     """解析 JSON 並取得 lines 陣列，失敗回傳 None"""
     try:
@@ -308,22 +343,99 @@ def parse_lines_from_json(raw_text):
 
     return [str(line) for line in lines]
 
-def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_prompt,
-                          reasoning_effort="none", subtitle_style="youtube"):
-    """請 LLM 將長文字切分為字幕行，支援 GPT-5.2 Responses API + JSON Structured Output
+def split_text_into_batches(text, max_chars=SEGMENTATION_BATCH_MAX_CHARS):
+    """將長文按自然斷點切分為多個 batch，保證每段不超過 max_chars"""
+    if len(text) <= max_chars:
+        return [text]
 
-    Returns:
-        tuple: (segmented_text, usage_dict) - 斷句文字和使用量資訊
-    """
-    logger.info(f"Starting LLM segmentation. Model: {model}, Max chars: {max_chars}, Style: {subtitle_style}")
-    logger.info(f"Reasoning effort: {reasoning_effort}")
-    client = openai.OpenAI(api_key=api_key)
+    batches = []
+    remaining = text
 
-    # 根據風格設定不同的斷句規則
+    while remaining:
+        if len(remaining) <= max_chars:
+            batches.append(remaining)
+            break
+
+        split_pos = -1
+        for i in range(min(max_chars, len(remaining)) - 1, max_chars // 2, -1):
+            if remaining[i] in SEGMENTATION_BATCH_DELIMITERS:
+                split_pos = i + 1
+                break
+
+        if split_pos == -1:
+            for i in range(min(max_chars, len(remaining)) - 1, max_chars // 2, -1):
+                if remaining[i] in set("，,、 \t"):
+                    split_pos = i + 1
+                    break
+
+        if split_pos == -1:
+            split_pos = max_chars
+
+        batches.append(remaining[:split_pos])
+        remaining = remaining[split_pos:]
+
+    return batches
+
+NORMALIZE_IGNORE_CHARS = set(" \t\n\r，。？！：；、,.?!:;\"'()（）[]{}-—－~～《》")
+
+def _content_length(text):
+    """計算忽略標點後的實際內容字數"""
+    return sum(1 for c in text if c not in NORMALIZE_IGNORE_CHARS)
+
+def _normalize_text(text):
+    """正規化文字用於比對（忽略標點、空白，統一小寫）"""
+    return "".join(c for c in text if c not in NORMALIZE_IGNORE_CHARS).lower()
+
+def validate_and_fix_lines(lines, max_chars, original_text, client, model, system_prompt, reasoning_effort=None):
+    """後驗證：超長行送回 LLM 二次斷句，驗證字元完整性。回傳 (fixed_lines, extra_usage)"""
+    extra_usage = {"input_tokens": 0, "output_tokens": 0}
+
+    fixed_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        if _content_length(line) <= max_chars:
+            fixed_lines.append(line)
+            continue
+
+        logger.info(f"Line too long ({_content_length(line)} chars > {max_chars}), re-segmenting with LLM: {line[:30]}...")
+        try:
+            reseg_lines, reseg_usage = call_llm_segmentation(
+                client, model, system_prompt, line, reasoning_effort
+            )
+            extra_usage["input_tokens"] += reseg_usage["input_tokens"]
+            extra_usage["output_tokens"] += reseg_usage["output_tokens"]
+
+            still_too_long = any(_content_length(l) > max_chars for l in reseg_lines)
+            if not reseg_lines or still_too_long:
+                logger.warning("Re-segmentation still produced long lines, keeping original.")
+                fixed_lines.append(line)
+            else:
+                fixed_lines.extend(reseg_lines)
+        except Exception as e:
+            logger.warning(f"Re-segmentation failed, keeping original line: {e}")
+            fixed_lines.append(line)
+
+    original_norm = _normalize_text(original_text)
+    result_norm = _normalize_text("".join(fixed_lines))
+
+    if original_norm != result_norm:
+        diff = len(original_norm) - len(result_norm)
+        logger.warning(f"Character mismatch after segmentation: original={len(original_norm)}, result={len(result_norm)}, diff={diff}")
+
+    return fixed_lines, extra_usage
+
+def build_segmentation_prompt(max_chars, subtitle_style, segmentation_prompt):
+    """建構含 few-shot 範例的斷句 system prompt"""
     if subtitle_style == "tiktok":
         style_hint = f"每行字幕要短，通常 3-8 個字，不超過 {max_chars} 個字。"
-    else:  # youtube
+    else:
         style_hint = f"每行字幕不超過 {max_chars} 個中文字。"
+
+    example = FEW_SHOT_EXAMPLES[subtitle_style]
+    example_output = json.dumps({"lines": example["output"]}, ensure_ascii=False)
 
     system_prompt = (
         "你是一個專業的字幕編輯員。你的任務是將輸入的逐字稿重新斷句，使其符合字幕閱讀習慣。\n"
@@ -332,25 +444,29 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
         "2. 重要：請嚴格保持輸入文本的原始字元（包括繁簡體），不要進行繁簡轉換，僅進行斷句。絕對不要改寫文字內容，不要刪減字，不要增加字（除了標點符號）。\n"
         "3. 請依照語氣和語意進行換行。\n"
         "4. 如果遇到語氣詞（如：啦、喔、耶），請保留。\n"
-        "5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。"
+        "5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。\n"
+        "\n"
+        "--- 範例 ---\n"
+        f"輸入：{example['input']}\n"
+        f"輸出：{example_output}\n"
+        "--- 範例結束 ---"
     )
 
-    # 如果使用者有自定義 Prompt，疊加進去
     if segmentation_prompt:
         system_prompt += f"\n額外指令: {segmentation_prompt}"
 
+    return system_prompt
+
+def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=None):
+    """呼叫 LLM 進行單次斷句，含三層 fallback。回傳 (lines, usage)"""
     usage = {"input_tokens": 0, "output_tokens": 0}
 
-    if not full_text or not full_text.strip():
-        return "", usage
-
     try:
-        # 使用 Responses API + JSON Schema
         response_kwargs = {
             "model": model,
             "input": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_text}
+                {"role": "user", "content": text}
             ],
             "text": {
                 "format": {
@@ -359,13 +475,13 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
                     "strict": True,
                     "schema": SEGMENTATION_SCHEMA
                 }
-            }
+            },
+            "temperature": 0,
         }
         if reasoning_effort and model.startswith("gpt-5"):
             response_kwargs["reasoning"] = {"effort": reasoning_effort}
 
         response = client.responses.create(**response_kwargs)
-        logger.info("LLM segmentation completed (Responses API + JSON Schema).")
 
         if hasattr(response, 'usage') and response.usage:
             usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
@@ -375,9 +491,7 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
         if lines is None:
             raise ValueError("Responses API JSON parsing failed")
 
-        track_openai_cost(model, usage["input_tokens"], usage["output_tokens"])
-        logger.info(f"Token usage: input={usage['input_tokens']}, output={usage['output_tokens']}")
-        return "\n".join(lines), usage
+        return lines, usage
 
     except Exception as e:
         logger.warning(f"Responses API failed, falling back to Chat Completions JSON: {str(e)}")
@@ -387,9 +501,9 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_text}
+                    {"role": "user", "content": text}
                 ],
-                temperature=0.3,
+                temperature=0,
                 response_format={"type": "json_object"}
             )
 
@@ -401,29 +515,74 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
             if lines is None:
                 raise ValueError("Chat JSON parsing failed")
 
-            logger.info("LLM segmentation completed (Chat Completions + JSON mode).")
-            track_openai_cost(model, usage["input_tokens"], usage["output_tokens"])
-            return "\n".join(lines), usage
+            return lines, usage
 
         except Exception as e2:
             logger.warning(f"JSON mode failed, using plain text fallback: {str(e2)}")
 
+            plain_prompt = system_prompt.replace(
+                "5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。",
+                "5. 輸出格式為純文字，行與行之間用換行符號分隔。"
+            )
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt.replace("5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。", "5. 輸出格式為純文字，行與行之間用換行符號分隔。")},
-                    {"role": "user", "content": full_text}
+                    {"role": "system", "content": plain_prompt},
+                    {"role": "user", "content": text}
                 ],
-                temperature=0.3
+                temperature=0
             )
 
             if response.usage:
                 usage["input_tokens"] += response.usage.prompt_tokens
                 usage["output_tokens"] += response.usage.completion_tokens
 
-            logger.info("LLM segmentation completed (plain text fallback).")
-            track_openai_cost(model, usage["input_tokens"], usage["output_tokens"])
-            return response.choices[0].message.content.strip(), usage
+            raw_lines = response.choices[0].message.content.strip().split("\n")
+            return [l.strip() for l in raw_lines if l.strip()], usage
+
+def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_prompt,
+                          reasoning_effort="none", subtitle_style="youtube"):
+    """請 LLM 將長文字切分為字幕行，含分批處理與後驗證。
+
+    Returns:
+        tuple: (segmented_text, usage_dict) - 斷句文字和使用量資訊
+    """
+    logger.info(f"Starting LLM segmentation. Model: {model}, Max chars: {max_chars}, Style: {subtitle_style}")
+    logger.info(f"Reasoning effort: {reasoning_effort}")
+
+    total_usage = {"input_tokens": 0, "output_tokens": 0}
+
+    if not full_text or not full_text.strip():
+        return "", total_usage
+
+    client = openai.OpenAI(api_key=api_key)
+    system_prompt = build_segmentation_prompt(max_chars, subtitle_style, segmentation_prompt)
+
+    batches = split_text_into_batches(full_text.strip())
+    logger.info(f"Split text into {len(batches)} batch(es) for segmentation.")
+
+    all_lines = []
+    for i, batch in enumerate(batches):
+        logger.info(f"Processing batch {i + 1}/{len(batches)} ({len(batch)} chars)...")
+
+        lines, usage = call_llm_segmentation(
+            client, model, system_prompt, batch, reasoning_effort
+        )
+
+        total_usage["input_tokens"] += usage["input_tokens"]
+        total_usage["output_tokens"] += usage["output_tokens"]
+        all_lines.extend(lines)
+
+    all_lines, fix_usage = validate_and_fix_lines(
+        all_lines, max_chars, full_text, client, model, system_prompt, reasoning_effort
+    )
+    total_usage["input_tokens"] += fix_usage["input_tokens"]
+    total_usage["output_tokens"] += fix_usage["output_tokens"]
+
+    track_openai_cost(model, total_usage["input_tokens"], total_usage["output_tokens"])
+    logger.info(f"Segmentation complete: {len(all_lines)} lines, tokens: in={total_usage['input_tokens']}, out={total_usage['output_tokens']}")
+
+    return "\n".join(all_lines), total_usage
 
 # --- 3.5 繁簡轉換 (OpenCC) ---
 
