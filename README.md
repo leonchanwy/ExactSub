@@ -8,7 +8,7 @@ AI-powered subtitle generator that combines **ElevenLabs Scribe** for precise ch
 
 Traditional speech-to-text tools either give you a wall of text with no timing, or break lines at awkward points. ExactSub solves this by splitting the work:
 
-1. **ElevenLabs Scribe v1** handles transcription with character-level timestamps
+1. **ElevenLabs Scribe v2** handles transcription with character-level timestamps
 2. **OpenAI GPT** handles semantic segmentation — breaking text into natural, readable subtitle lines
 3. A custom **alignment algorithm** merges the two, mapping each segmented line back to precise timestamps
 
@@ -16,7 +16,7 @@ The result: subtitles that are both **accurately timed** and **naturally segment
 
 ## Features
 
-- **Accurate timestamps** — Character-level alignment from ElevenLabs Scribe v1
+- **Accurate timestamps** — Character-level alignment from ElevenLabs Scribe v2
 - **Semantic segmentation** — LLM-powered line breaking that respects meaning and reading flow
 - **Multiple subtitle styles** — YouTube (full sentences, 10–30 chars/line) or TikTok (short bursts, 3–8 chars/line)
 - **Multi-language support** — Chinese, English, Japanese, Korean, Cantonese, or auto-detect
@@ -140,7 +140,7 @@ MIT
 
 傳統語音轉文字工具要嘛只給你一整段沒有時間軸的文字，要嘛在不自然的地方斷行。ExactSub 把工作分成兩步：
 
-1. **ElevenLabs Scribe v1** 負責轉錄，提供字元級時間戳
+1. **ElevenLabs Scribe v2** 負責轉錄，提供字元級時間戳
 2. **OpenAI GPT** 負責語意斷句，根據語意和語氣自然換行
 3. 自製的**對齊演算法**將兩者合併，為每行字幕匹配精準的起訖時間
 
@@ -148,7 +148,7 @@ MIT
 
 ## 功能特色
 
-- **精準時間戳** — 基於 ElevenLabs Scribe v1 的字元級對齊
+- **精準時間戳** — 基於 ElevenLabs Scribe v2 的字元級對齊
 - **語意斷句** — LLM 驅動的智慧換行，尊重語意和閱讀節奏
 - **多種字幕風格** — YouTube（完整語句，每行 10–30 字）或 TikTok（短句快節奏，每行 3–8 字）
 - **多語言支援** — 中文、英文、日文、韓文、粵語，或自動偵測

@@ -6,6 +6,7 @@ import json
 import logging
 import io
 import time
+import hashlib
 from pathlib import Path
 import pandas as pd
 
@@ -222,14 +223,14 @@ def transcribe_audio(
     """
     使用 ElevenLabs Scribe 模型進行轉錄。
     """
-    logger.info("Starting transcription with ElevenLabs Scribe v1...")
+    logger.info("Starting transcription with ElevenLabs Scribe v2...")
     url = "https://api.elevenlabs.io/v1/speech-to-text"
     headers = {
         "xi-api-key": api_key
     }
-    # Scribe v1 是 ElevenLabs 目前最強的 STT 模型
+    # 使用 Scribe v2 進行語音轉文字
     data = {
-        "model_id": "scribe_v1",
+        "model_id": "scribe_v2",
         "tag_audio_events": "false",
         "timestamps_granularity": "character",  # 重要！取得字元級時間戳記
     }
@@ -505,31 +506,31 @@ def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=N
         return lines, usage
 
     except Exception as e:
-        logger.warning(f"Responses API failed, falling back to Chat Completions JSON: {str(e)}")
+        logger.warning(f"Responses API failed, falling back to Responses JSON-object mode: {str(e)}")
 
         try:
-            response = client.chat.completions.create(
+            response = client.responses.create(
                 model=model,
-                messages=[
+                input=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
                 ],
                 temperature=0,
-                response_format={"type": "json_object"}
+                text={"format": {"type": "json_object"}}
             )
 
-            if response.usage:
-                usage["input_tokens"] += response.usage.prompt_tokens
-                usage["output_tokens"] += response.usage.completion_tokens
+            if hasattr(response, 'usage') and response.usage:
+                usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
+                usage["output_tokens"] += getattr(response.usage, 'output_tokens', 0)
 
-            lines = parse_lines_from_json(response.choices[0].message.content)
+            lines = parse_lines_from_json(response.output_text)
             if lines is None:
-                raise ValueError("Chat JSON parsing failed")
+                raise ValueError("Responses JSON-object parsing failed")
 
             return lines, usage
 
         except Exception as e2:
-            logger.warning(f"JSON mode failed, using plain text fallback: {str(e2)}")
+            logger.warning(f"Responses JSON-object mode failed, using Chat plain text fallback: {str(e2)}")
 
             plain_prompt = system_prompt.replace(
                 "5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。",
@@ -1083,7 +1084,7 @@ with st.sidebar:
             "日文": "日文",
             "馬來文": "馬來文",
         }
-        selected_translation = st.selectbox("翻譯語言", list(translation_options.keys()), index=1)
+        selected_translation = st.selectbox("翻譯語言", list(translation_options.keys()), index=0)
         target_language = translation_options[selected_translation]
 
         use_opencc = False
@@ -1151,8 +1152,12 @@ if 'cached_file_key' not in st.session_state:
     st.session_state.cached_file_key = None
 
 def _file_cache_key(f):
-    """產生檔案的快取 key（名稱+大小）"""
-    return f"{f.name}_{f.size}"
+    """產生檔案快取 key（名稱+大小+內容雜湊）以避免誤命中"""
+    try:
+        digest = hashlib.sha256(f.getbuffer()).hexdigest()[:16]
+    except Exception:
+        digest = "nohash"
+    return f"{f.name}_{f.size}_{digest}"
 
 def _run_pipeline(raw_transcript, uploaded_file, skip_transcribe=False):
     """執行 Step 2-4 的共用流程，回傳是否成功"""
@@ -1287,7 +1292,7 @@ if uploaded_file and el_key and oa_key:
         if btn_full:
             uploaded_file.seek(0)
             est_minutes = max(1, file_size_mb * 0.5)
-            with st.spinner(f"🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v1)... 預估需要 {est_minutes:.0f}-{est_minutes * 2:.0f} 分鐘"):
+            with st.spinner(f"🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v2)... 預估需要 {est_minutes:.0f}-{est_minutes * 2:.0f} 分鐘"):
                 raw_transcript = transcribe_audio(
                     uploaded_file, el_key, language_code,
                     timeout=(connect_timeout, read_timeout),
