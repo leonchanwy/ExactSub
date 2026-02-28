@@ -437,7 +437,9 @@ def validate_and_fix_lines(lines, max_chars, original_text, client, model, syste
                 continue
 
             if reseg_calls >= RESEG_MAX_CALLS:
-                logger.info(f"Re-segmentation call limit ({RESEG_MAX_CALLS}) reached, keeping remaining lines as-is.")
+                if reseg_calls == RESEG_MAX_CALLS:
+                    remaining = sum(1 for l in non_empty[non_empty.index(line):] if _content_length(l) > threshold)
+                    logger.info(f"Re-segmentation call limit ({RESEG_MAX_CALLS}) reached, keeping {remaining} remaining overlong lines as-is.")
                 fixed_lines.append(line)
                 continue
 
@@ -502,6 +504,7 @@ def build_segmentation_prompt(max_chars, subtitle_style, segmentation_prompt):
 def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=None):
     """呼叫 LLM 進行單次斷句，含三層 fallback。回傳 (lines, usage)"""
     usage = {"input_tokens": 0, "output_tokens": 0}
+    is_gpt5 = model.startswith("gpt-5")
 
     try:
         response_kwargs = {
@@ -518,10 +521,12 @@ def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=N
                     "schema": SEGMENTATION_SCHEMA
                 }
             },
-            "temperature": 0,
         }
-        if reasoning_effort and model.startswith("gpt-5"):
-            response_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if is_gpt5:
+            if reasoning_effort:
+                response_kwargs["reasoning"] = {"effort": reasoning_effort}
+        else:
+            response_kwargs["temperature"] = 0
 
         response = client.responses.create(**response_kwargs)
 
@@ -536,18 +541,24 @@ def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=N
         return lines, usage
 
     except Exception as e:
-        logger.warning(f"Responses API failed, falling back to Responses JSON-object mode: {str(e)}")
+        logger.warning(f"Responses API failed, falling back to JSON-object mode: {str(e)}")
 
         try:
-            response = client.responses.create(
-                model=model,
-                input=[
+            response_kwargs2 = {
+                "model": model,
+                "input": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
                 ],
-                temperature=0,
-                text={"format": {"type": "json_object"}}
-            )
+                "text": {"format": {"type": "json_object"}},
+            }
+            if is_gpt5:
+                if reasoning_effort:
+                    response_kwargs2["reasoning"] = {"effort": reasoning_effort}
+            else:
+                response_kwargs2["temperature"] = 0
+
+            response = client.responses.create(**response_kwargs2)
 
             if hasattr(response, 'usage') and response.usage:
                 usage["input_tokens"] += getattr(response.usage, 'input_tokens', 0)
@@ -555,25 +566,28 @@ def call_llm_segmentation(client, model, system_prompt, text, reasoning_effort=N
 
             lines = parse_lines_from_json(response.output_text)
             if lines is None:
-                raise ValueError("Responses JSON-object parsing failed")
+                raise ValueError("JSON-object parsing failed")
 
             return lines, usage
 
         except Exception as e2:
-            logger.warning(f"Responses JSON-object mode failed, using Chat plain text fallback: {str(e2)}")
+            logger.warning(f"JSON-object mode failed, using plain text fallback: {str(e2)}")
 
             plain_prompt = system_prompt.replace(
                 "5. 請以 JSON 格式輸出，將每行字幕放入 lines 陣列中。",
                 "5. 輸出格式為純文字，行與行之間用換行符號分隔。"
             )
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response_kwargs3 = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": plain_prompt},
                     {"role": "user", "content": text}
                 ],
-                temperature=0
-            )
+            }
+            if not is_gpt5:
+                response_kwargs3["temperature"] = 0
+
+            response = client.chat.completions.create(**response_kwargs3)
 
             if response.usage:
                 usage["input_tokens"] += response.usage.prompt_tokens
