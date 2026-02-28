@@ -7,6 +7,7 @@ import logging
 import io
 import time
 from pathlib import Path
+import pandas as pd
 
 # --- 0. Logging 設定 ---
 logger = logging.getLogger(__name__)
@@ -1343,7 +1344,6 @@ if uploaded_file and el_key and oa_key:
         # SRT 表格預覽
         st.subheader("字幕預覽")
         if result.get('srt_data'):
-            import pandas as pd
             df = pd.DataFrame([
                 {"#": item["index"], "開始": item["start"], "結束": item["end"], "字幕": item["text"]}
                 for item in result['srt_data']

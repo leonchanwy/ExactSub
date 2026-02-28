@@ -31,7 +31,7 @@ The result: subtitles that are both **accurately timed** and **naturally segment
 ## How It Works
 
 ```
-Audio File (mp3/wav/m4a)
+Audio File (mp3/wav/m4a/flac/ogg)
         │
         ▼
 ┌─────────────────────┐
@@ -87,7 +87,7 @@ Then open the URL shown in the terminal (default: `http://localhost:8501`).
    - Set max characters per line
    - Select OpenAI model
    - Choose audio language (or auto-detect)
-3. **Upload an audio file** (mp3, wav, or m4a)
+3. **Upload an audio file** (mp3, wav, m4a, flac, or ogg)
 4. **Click "開始生成字幕"** (Start generating subtitles)
 5. **Download** the generated `.srt` file
 
@@ -163,7 +163,7 @@ MIT
 ## 運作原理
 
 ```
-音訊檔案 (mp3/wav/m4a)
+音訊檔案 (mp3/wav/m4a/flac/ogg)
         │
         ▼
 ┌─────────────────────┐
@@ -219,7 +219,7 @@ streamlit run app.py
    - 設定每行最大字數
    - 選擇 OpenAI 模型
    - 選擇音訊語言（或自動偵測）
-3. **上傳音訊檔案**（mp3、wav 或 m4a）
+3. **上傳音訊檔案**（mp3、wav、m4a、flac 或 ogg）
 4. **點擊「開始生成字幕」**
 5. **下載**生成的 `.srt` 字幕檔
 
