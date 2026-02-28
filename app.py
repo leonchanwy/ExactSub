@@ -1142,7 +1142,7 @@ with st.sidebar:
             "日文": "日文",
             "馬來文": "馬來文",
         }
-        selected_translation = st.selectbox("翻譯語言", list(translation_options.keys()), index=0)
+        selected_translation = st.selectbox("翻譯語言", list(translation_options.keys()), index=1)
         target_language = translation_options[selected_translation]
 
         use_opencc = False
