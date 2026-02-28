@@ -1285,7 +1285,8 @@ if uploaded_file and el_key and oa_key:
 
         if btn_full:
             uploaded_file.seek(0)
-            with st.spinner("🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v1)..."):
+            est_minutes = max(1, file_size_mb * 0.5)
+            with st.spinner(f"🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v1)... 預估需要 {est_minutes:.0f}-{est_minutes * 2:.0f} 分鐘"):
                 raw_transcript = transcribe_audio(
                     uploaded_file, el_key, language_code,
                     timeout=(connect_timeout, read_timeout),
