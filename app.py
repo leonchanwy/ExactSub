@@ -1141,147 +1141,171 @@ with st.sidebar:
 # Main Area
 uploaded_file = st.file_uploader("上傳音訊檔案 (mp3, wav, m4a, flac, ogg)", type=SUPPORTED_AUDIO_TYPES)
 
-# 初始化 session state 來儲存結果
+# 初始化 session state
 if 'result' not in st.session_state:
     st.session_state.result = None
+if 'cached_transcript' not in st.session_state:
+    st.session_state.cached_transcript = None
+if 'cached_file_key' not in st.session_state:
+    st.session_state.cached_file_key = None
 
-if uploaded_file and el_key and oa_key:
-    file_size_mb = uploaded_file.size / (1024 * 1024)
-    if file_size_mb > UPLOAD_MAX_SIZE_MB:
-        st.error(f"❌ 檔案過大 ({file_size_mb:.1f} MB)，上限為 {UPLOAD_MAX_SIZE_MB} MB。")
-    elif st.button("開始生成字幕"):
-        # 設定 logger
-        setup_logger()
-        log_stream = get_log_stream()
+def _file_cache_key(f):
+    """產生檔案的快取 key（名稱+大小）"""
+    return f"{f.name}_{f.size}"
 
-        # 清空之前的 log
-        log_stream.truncate(0)
-        log_stream.seek(0)
+def _run_pipeline(raw_transcript, uploaded_file, skip_transcribe=False):
+    """執行 Step 2-4 的共用流程，回傳是否成功"""
+    setup_logger()
+    log_stream = get_log_stream()
+    log_stream.truncate(0)
+    log_stream.seek(0)
 
-        # 重置結果和費用追蹤器
-        st.session_state.result = None
-        reset_cost_tracker()
+    st.session_state.result = None
+    reset_cost_tracker()
 
-        status = st.status("正在處理中...", expanded=True)
-        error_occurred = False
+    status = st.status("正在處理中...", expanded=True)
+    error_occurred = False
 
-        try:
-            # Step 1: Transcribe
-            status.write("🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v1)...")
-            # 重置指標以防重複讀取
-            uploaded_file.seek(0)
-            raw_transcript = transcribe_audio(
-                uploaded_file,
-                el_key,
-                language_code,
-                timeout=(connect_timeout, read_timeout),
-                max_retries=int(retry_count),
-                retry_backoff=int(retry_backoff)
-            )
+    try:
+        full_text = raw_transcript.get('text', '')
 
-            # 提取純文字用於 LLM
-            full_text = raw_transcript.get('text', '')
-
-            # 追蹤 ElevenLabs 費用
+        if not skip_transcribe:
             audio_duration = raw_transcript.get('audio_duration', 0)
             if audio_duration:
                 el_cost = track_elevenlabs_cost(audio_duration)
                 logger.info(f"ElevenLabs cost: ${el_cost:.4f} for {audio_duration:.2f}s audio")
 
-            status.write(f"✅ 轉錄完成！共 {len(full_text)} 個字。")
+        if not full_text or not full_text.strip():
+            status.update(label="❌ 轉錄結果為空", state="error")
+            st.error("❌ 轉錄結果為空白，可能是靜音檔案或不支援的格式。請確認音訊內容後重試。")
+            return
 
-            # Step 2: LLM Segmentation
-            status.write(f"🧠 正在呼叫 {model_choice} 進行語意斷句 ({subtitle_style} 風格)...")
-            segmented_text, seg_usage = segment_text_with_llm(
-                full_text, oa_key, model_choice, max_chars, custom_prompt,
-                reasoning_effort=reasoning_effort,
-                subtitle_style=subtitle_style
+        status.write(f"📝 轉錄文字：共 {len(full_text)} 個字。")
+
+        # Step 2: LLM Segmentation
+        status.write(f"🧠 正在呼叫 {model_choice} 進行語意斷句 ({subtitle_style} 風格)...")
+        segmented_text, seg_usage = segment_text_with_llm(
+            full_text, oa_key, model_choice, max_chars, custom_prompt,
+            reasoning_effort=reasoning_effort,
+            subtitle_style=subtitle_style
+        )
+        status.write("✅ 斷句完成！")
+
+        # Step 3: Alignment
+        status.write("🔗 正在進行時間軸對齊 (Word/Char Level Alignment)...")
+        srt_data, matched_cnt, total_cnt = align_transcript(raw_transcript, segmented_text)
+
+        match_rate = (matched_cnt / total_cnt * 100) if total_cnt > 0 else 0
+        status.write(f"📊 對齊匹配率: {match_rate:.2f}% ({matched_cnt}/{total_cnt})")
+        logger.info(f"Match rate: {match_rate:.2f}%")
+
+        low_match_rate = match_rate < 80
+
+        # Step 4: Keyword 修正 / 校正 / 翻譯
+        srt_lines = [item["text"] for item in srt_data]
+        replacements, keep_terms = parse_keyword_rules(keyword_rules)
+
+        if replacements:
+            srt_lines = apply_replacements_to_lines(srt_lines, replacements)
+
+        if enable_correction and srt_lines:
+            status.write("🧹 正在校正字幕文字...")
+            srt_lines, _ = correct_lines_with_llm(
+                srt_lines, oa_key, model_choice, output_style,
+                subtitle_style, replacements, keep_terms
             )
-            status.write("✅ 斷句完成！")
+            status.write("✅ 字幕校正完成！")
 
-            # Step 3: Alignment
-            status.write("🔗 正在進行時間軸對齊 (Word/Char Level Alignment)...")
-            srt_data, matched_cnt, total_cnt = align_transcript(raw_transcript, segmented_text)
-
-            match_rate = (matched_cnt / total_cnt * 100) if total_cnt > 0 else 0
-            status.write(f"📊 對齊匹配率: {match_rate:.2f}% ({matched_cnt}/{total_cnt})")
-            logger.info(f"Match rate: {match_rate:.2f}%")
-
-            low_match_rate = match_rate < 80
-
-            # Step 4: Keyword 修正 / 校正 / 翻譯
-            srt_lines = [item["text"] for item in srt_data]
-            replacements, keep_terms = parse_keyword_rules(keyword_rules)
-
-            if replacements:
-                srt_lines = apply_replacements_to_lines(srt_lines, replacements)
-
-            if enable_correction and srt_lines:
-                status.write("🧹 正在校正字幕文字...")
-                srt_lines, _ = correct_lines_with_llm(
-                    srt_lines,
-                    oa_key,
-                    model_choice,
-                    output_style,
-                    subtitle_style,
-                    replacements,
-                    keep_terms
+        if target_language != "source" and srt_lines:
+            if target_language == "繁體中文" and use_opencc:
+                status.write("🇨🇳->🇹🇼 正在轉換為繁體中文 (OpenCC)...")
+                srt_lines = convert_lines_to_traditional(srt_lines)
+                status.write("✅ 繁體轉換完成！")
+            else:
+                status.write(f"🌐 正在翻譯字幕為 {target_language}...")
+                srt_lines, _ = translate_lines_with_llm(
+                    srt_lines, oa_key, model_choice, target_language,
+                    output_style, subtitle_style, replacements, keep_terms
                 )
-                status.write("✅ 字幕校正完成！")
+                status.write("✅ 翻譯完成！")
 
-            if target_language != "source" and srt_lines:
-                if target_language == "繁體中文" and use_opencc:
-                    status.write("🇨🇳->🇹🇼 正在轉換為繁體中文 (OpenCC)...")
-                    srt_lines = convert_lines_to_traditional(srt_lines)
-                    status.write("✅ 繁體轉換完成！")
-                else:
-                    status.write(f"🌐 正在翻譯字幕為 {target_language}...")
-                    srt_lines, _ = translate_lines_with_llm(
-                        srt_lines,
-                        oa_key,
-                        model_choice,
-                        target_language,
-                        output_style,
-                        subtitle_style,
-                        replacements,
-                        keep_terms
-                    )
-                    status.write("✅ 翻譯完成！")
+        srt_data = set_srt_texts(srt_data, srt_lines)
+        srt_string = generate_srt_string(srt_data, clean_text=clean_punctuation)
+        cost_summary = get_cost_summary()
 
-            srt_data = set_srt_texts(srt_data, srt_lines)
-            srt_string = generate_srt_string(srt_data, clean_text=clean_punctuation)
+        status.update(label="🎉 任務完成！", state="complete", expanded=False)
 
-            # 取得費用摘要
-            cost_summary = get_cost_summary()
+        st.session_state.result = {
+            'full_text': full_text,
+            'segmented_text': segmented_text,
+            'srt_string': srt_string,
+            'srt_data': srt_data,
+            'low_match_rate': low_match_rate,
+            'filename': uploaded_file.name,
+            'raw_api_response': raw_transcript,
+            'cost_summary': cost_summary,
+        }
 
-            status.update(label="🎉 任務完成！", state="complete", expanded=False)
+    except Exception as e:
+        error_occurred = True
+        status.update(label="❌ 發生錯誤", state="error")
+        st.error(f"Error Log: {str(e)}")
+        logger.error(f"Critical error: {str(e)}")
 
-            # 儲存結果到 session state
-            st.session_state.result = {
-                'full_text': full_text,
-                'segmented_text': segmented_text,
-                'srt_string': srt_string,
-                'low_match_rate': low_match_rate,
-                'filename': uploaded_file.name,
-                'raw_api_response': raw_transcript,  # 保存原始 API 回應以便調試
-                'cost_summary': cost_summary,  # 費用摘要
-            }
+    with st.expander("📝 執行日誌 (Logs)", expanded=error_occurred):
+        st.code(get_log_stream().getvalue())
 
-        except Exception as e:
-            error_occurred = True
-            status.update(label="❌ 發生錯誤", state="error")
-            st.error(f"Error Log: {str(e)}")
-            logger.error(f"Critical error: {str(e)}")
+if uploaded_file and el_key and oa_key:
+    file_size_mb = uploaded_file.size / (1024 * 1024)
+    file_ext = uploaded_file.name.rsplit('.', 1)[-1].upper() if '.' in uploaded_file.name else '?'
 
-        # 顯示 Logs
-        with st.expander("📝 執行日誌 (Logs)", expanded=error_occurred):
-            st.code(get_log_stream().getvalue())
+    # 檔案資訊顯示
+    st.caption(f"📁 **{uploaded_file.name}** — {file_size_mb:.1f} MB · {file_ext}")
 
-    # 在 status 外部顯示結果 (使用 session state)
+    if file_size_mb > UPLOAD_MAX_SIZE_MB:
+        st.error(f"❌ 檔案過大 ({file_size_mb:.1f} MB)，上限為 {UPLOAD_MAX_SIZE_MB} MB。")
+    else:
+        # 檢查是否有同一檔案的快取轉錄
+        current_key = _file_cache_key(uploaded_file)
+        has_cache = (
+            st.session_state.cached_transcript is not None
+            and st.session_state.cached_file_key == current_key
+        )
+
+        if has_cache:
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                btn_full = st.button("🔄 重新轉錄 + 生成字幕", use_container_width=True)
+            with col_btn2:
+                btn_reseg = st.button("✂️ 重新斷句（使用快取轉錄）", use_container_width=True,
+                                      help="跳過 ElevenLabs 轉錄，直接用上次的轉錄結果重新斷句。省時省錢。")
+        else:
+            btn_full = st.button("開始生成字幕", use_container_width=True)
+            btn_reseg = False
+
+        if btn_full:
+            uploaded_file.seek(0)
+            with st.spinner("🎧 正在上傳至 ElevenLabs 進行轉錄 (Scribe v1)..."):
+                raw_transcript = transcribe_audio(
+                    uploaded_file, el_key, language_code,
+                    timeout=(connect_timeout, read_timeout),
+                    max_retries=int(retry_count),
+                    retry_backoff=int(retry_backoff)
+                )
+            st.session_state.cached_transcript = raw_transcript
+            st.session_state.cached_file_key = current_key
+            _run_pipeline(raw_transcript, uploaded_file, skip_transcribe=False)
+
+        elif btn_reseg:
+            _run_pipeline(st.session_state.cached_transcript, uploaded_file, skip_transcribe=True)
+
+    # 顯示結果
     if st.session_state.result:
         result = st.session_state.result
 
-        # 顯示費用摘要
+        st.markdown("---")
+
+        # 費用摘要
         if 'cost_summary' in result:
             cost = result['cost_summary']
             openai_line = (
@@ -1311,25 +1335,35 @@ if uploaded_file and el_key and oa_key:
                 if 'words' in api_response:
                     words = api_response['words']
                     st.write(f"**Words 數量:** {len(words)}")
-                    if words and len(words) > 0:
+                    if words:
                         st.write(f"**第一個 word 結構:** {words[0]}")
                 st.json(api_response)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("LLM 斷句結果")
-            st.text_area("Segmented", result['segmented_text'], height=300)
-
-        with col2:
-            st.subheader("SRT 預覽")
+        # SRT 表格預覽
+        st.subheader("字幕預覽")
+        if result.get('srt_data'):
+            import pandas as pd
+            df = pd.DataFrame([
+                {"#": item["index"], "開始": item["start"], "結束": item["end"], "字幕": item["text"]}
+                for item in result['srt_data']
+            ])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
             st.text_area("SRT", result['srt_string'], height=300)
+
+        with st.expander("LLM 斷句結果"):
+            st.text_area("Segmented", result['segmented_text'], height=200, label_visibility="collapsed")
+
+        with st.expander("SRT 原始文字"):
+            st.text_area("SRT Raw", result['srt_string'], height=200, label_visibility="collapsed")
 
         # Download Button
         st.download_button(
-            label="下載 .srt 字幕檔",
+            label="📥 下載 .srt 字幕檔",
             data=result['srt_string'],
             file_name=f"{Path(result['filename']).stem}.srt",
-            mime="text/plain"
+            mime="text/plain",
+            use_container_width=True
         )
 
 elif not (el_key and oa_key):
