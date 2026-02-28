@@ -405,37 +405,60 @@ def _normalize_text(text):
     """正規化文字用於比對（忽略標點、空白，統一小寫）"""
     return "".join(c for c in text if c not in NORMALIZE_IGNORE_CHARS).lower()
 
+RESEG_TOLERANCE = 1.5
+RESEG_SKIP_RATIO = 0.3
+RESEG_MAX_CALLS = 20
+
+RESEG_MODEL = "gpt-5.2"
+RESEG_REASONING_EFFORT = "high"
+
 def validate_and_fix_lines(lines, max_chars, original_text, client, model, system_prompt, reasoning_effort=None):
-    """後驗證：超長行送回 LLM 二次斷句，驗證字元完整性。回傳 (fixed_lines, extra_usage)"""
+    """後驗證：嚴重超長行用更強模型二次斷句，驗證字元完整性。回傳 (fixed_lines, extra_usage)"""
     extra_usage = {"input_tokens": 0, "output_tokens": 0}
 
-    fixed_lines = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    non_empty = [l.strip() for l in lines if l.strip()]
+    threshold = int(max_chars * RESEG_TOLERANCE)
+    overlong_count = sum(1 for l in non_empty if _content_length(l) > threshold)
+    overlong_ratio = overlong_count / len(non_empty) if non_empty else 0
 
-        if _content_length(line) <= max_chars:
-            fixed_lines.append(line)
-            continue
+    if overlong_ratio > RESEG_SKIP_RATIO:
+        logger.info(f"Skipping re-segmentation: {overlong_count}/{len(non_empty)} lines ({overlong_ratio:.0%}) exceed {threshold} chars.")
+        fixed_lines = non_empty
+    else:
+        if RESEG_MODEL != model:
+            logger.info(f"Re-segmentation will use: {RESEG_MODEL} (reasoning: {RESEG_REASONING_EFFORT})")
 
-        logger.info(f"Line too long ({_content_length(line)} chars > {max_chars}), re-segmenting with LLM: {line[:30]}...")
-        try:
-            reseg_lines, reseg_usage = call_llm_segmentation(
-                client, model, system_prompt, line, reasoning_effort
-            )
-            extra_usage["input_tokens"] += reseg_usage["input_tokens"]
-            extra_usage["output_tokens"] += reseg_usage["output_tokens"]
-
-            still_too_long = any(_content_length(l) > max_chars for l in reseg_lines)
-            if not reseg_lines or still_too_long:
-                logger.warning("Re-segmentation still produced long lines, keeping original.")
+        fixed_lines = []
+        reseg_calls = 0
+        for line in non_empty:
+            clen = _content_length(line)
+            if clen <= threshold:
                 fixed_lines.append(line)
-            else:
-                fixed_lines.extend(reseg_lines)
-        except Exception as e:
-            logger.warning(f"Re-segmentation failed, keeping original line: {e}")
-            fixed_lines.append(line)
+                continue
+
+            if reseg_calls >= RESEG_MAX_CALLS:
+                logger.info(f"Re-segmentation call limit ({RESEG_MAX_CALLS}) reached, keeping remaining lines as-is.")
+                fixed_lines.append(line)
+                continue
+
+            logger.info(f"Line too long ({clen} chars > {threshold}), re-segmenting with {RESEG_MODEL} (reasoning: {RESEG_REASONING_EFFORT}): {line[:30]}...")
+            reseg_calls += 1
+            try:
+                reseg_lines, reseg_usage = call_llm_segmentation(
+                    client, RESEG_MODEL, system_prompt, line, RESEG_REASONING_EFFORT
+                )
+                extra_usage["input_tokens"] += reseg_usage["input_tokens"]
+                extra_usage["output_tokens"] += reseg_usage["output_tokens"]
+
+                still_too_long = any(_content_length(l) > threshold for l in reseg_lines)
+                if not reseg_lines or still_too_long:
+                    logger.warning("Re-segmentation still produced long lines, keeping original.")
+                    fixed_lines.append(line)
+                else:
+                    fixed_lines.extend(reseg_lines)
+            except Exception as e:
+                logger.warning(f"Re-segmentation failed, keeping original line: {e}")
+                fixed_lines.append(line)
 
     original_norm = _normalize_text(original_text)
     result_norm = _normalize_text("".join(fixed_lines))
@@ -595,10 +618,14 @@ def segment_text_with_llm(full_text, api_key, model, max_chars, segmentation_pro
     all_lines, fix_usage = validate_and_fix_lines(
         all_lines, max_chars, full_text, client, model, system_prompt, reasoning_effort
     )
-    total_usage["input_tokens"] += fix_usage["input_tokens"]
-    total_usage["output_tokens"] += fix_usage["output_tokens"]
 
     track_openai_cost(model, total_usage["input_tokens"], total_usage["output_tokens"])
+
+    if fix_usage["input_tokens"] or fix_usage["output_tokens"]:
+        track_openai_cost(RESEG_MODEL, fix_usage["input_tokens"], fix_usage["output_tokens"])
+
+    total_usage["input_tokens"] += fix_usage["input_tokens"]
+    total_usage["output_tokens"] += fix_usage["output_tokens"]
     logger.info(f"Segmentation complete: {len(all_lines)} lines, tokens: in={total_usage['input_tokens']}, out={total_usage['output_tokens']}")
 
     return "\n".join(all_lines), total_usage
