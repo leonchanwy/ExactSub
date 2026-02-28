@@ -405,7 +405,7 @@ def _normalize_text(text):
     """正規化文字用於比對（忽略標點、空白，統一小寫）"""
     return "".join(c for c in text if c not in NORMALIZE_IGNORE_CHARS).lower()
 
-RESEG_TOLERANCE = 1.5
+RESEG_TOLERANCE = 1.1
 RESEG_SKIP_RATIO = 0.3
 RESEG_MAX_CALLS = 20
 
